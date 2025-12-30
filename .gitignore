@@ -39,3 +39,21 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# IDE
+.vscode/
+.idea/
+.trae/
+# Ignored project folder
+ProjetoInlinks/
+
+# Supabase
+supabase/.branches
+supabase/.temp
+
+# OS
+Thumbs.db
+
+# Data exports
+*.csv
+
