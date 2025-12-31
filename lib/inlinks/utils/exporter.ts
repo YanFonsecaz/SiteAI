@@ -7,18 +7,22 @@ export function generateCSV(
   pillarUrl: string
 ): string {
   if (!data || data.length === 0) return "";
+
   const sanitize = (str: string | number | undefined) => {
     if (str === undefined || str === null) return "";
     const stringValue = String(str);
     return `"${stringValue.replace(/"/g, '""')}"`;
   };
+
   let domain = "";
   try {
     domain = new URL(pillarUrl).hostname;
   } catch {
     domain = pillarUrl;
   }
+
   const today = new Date().toLocaleDateString("pt-BR");
+
   const lines = [
     `"","","Auditoria de Linkagem Interna: ${domain} ","","","","","","","","",""`,
     `"","","","","","","","","","","",""`,
@@ -28,6 +32,7 @@ export function generateCSV(
     `"","","","","","","","","","","",""`,
     `"","URL Onde Inserir (Origem)","","Texto Âncora","URL Destino (Alvo)","Score","Instrução/Parágrafo","Contexto na Origem","Otimização Implementada","Justificativa"`,
   ];
+
   data.forEach((row, index) => {
     const instruction = `Inserir a marcação do hiperlink na âncora sinalizada em negrito:\n\n${row.trecho}`;
     const line = [
@@ -44,6 +49,7 @@ export function generateCSV(
     ].join(",");
     lines.push(line);
   });
+
   return "\uFEFF" + lines.join("\n");
 }
 

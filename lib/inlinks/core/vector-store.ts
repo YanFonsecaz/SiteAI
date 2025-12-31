@@ -41,6 +41,16 @@ export async function searchSimilarDocuments(
     const highQualityResults = resultsWithScore
       .filter(([, score]) => score >= threshold)
       .map(([doc]) => doc);
+    
+    // Log quando filtramos resultados de baixa qualidade
+    if (highQualityResults.length < resultsWithScore.length) {
+      console.log(
+        `[Vector Store] Filtrados ${
+          resultsWithScore.length - highQualityResults.length
+        } resultados com score < ${threshold}`
+      );
+    }
+    
     return highQualityResults;
   } catch (error) {
     console.error(`[Vector Store] Erro ao buscar documentos:`, error);

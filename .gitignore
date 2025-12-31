@@ -46,6 +46,7 @@ next-env.d.ts
 .trae/
 # Ignored project folder
 ProjetoInlinks/
+google_trends/
 
 # Supabase
 supabase/.branches

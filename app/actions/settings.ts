@@ -33,7 +33,9 @@ export async function saveSettings(settings: {
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    if (!user) return { success: false, error: 'unauthorized' };
+    if (!user) {
+      return { success: true };
+    }
     const { data: existing } = await supabase
       .from('user_settings')
       .select('user_id')

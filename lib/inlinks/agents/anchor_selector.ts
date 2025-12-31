@@ -4,6 +4,9 @@ import { ChatPromptTemplate } from "@langchain/core/prompts";
 import { getLLM } from "@/lib/inlinks/core/llm";
 import { AnchorOpportunity } from "@/lib/inlinks/types";
 import { validateOpportunitiesInDOM } from "./dom_validator";
+import { getVectorStore } from "@/lib/inlinks/core/vector-store";
+import { normalizeUrlForMetadata } from "@/lib/inlinks/utils/url-normalizer";
+import { Document } from "@langchain/core/documents";
 
 const anchorSchema = z.object({
   opportunities: z.array(
@@ -173,8 +176,29 @@ export async function findAnchorOpportunities(
     )
     .join("\n\n");
 
-  // RAG Removed for simple integration, using sliced content
-  const contextToAnalyze = contentToUse.slice(0, 20000); 
+  // RAG: Buscar contexto relevante no Supabase Vector Store com filtro por URL de origem
+  let contextToAnalyze = "";
+  try {
+    const relevantDocs = new Set<string>();
+    const intro = contentToUse.slice(0, 1500);
+    if (intro.length > 50) relevantDocs.add(intro);
+    const store = getVectorStore();
+    const normalizedOrigin = normalizeUrlForMetadata(originUrl);
+    const mainTargets = targets.slice(0, 3);
+    for (const t of mainTargets) {
+      const query = t.clusters[0] || t.theme || t.url;
+      const results = await store.similaritySearch(query, 2, { url: normalizedOrigin });
+      results.forEach((doc: Document) => {
+        if (doc.pageContent.length > 50) relevantDocs.add(doc.pageContent);
+      });
+    }
+    contextToAnalyze =
+      relevantDocs.size > 0
+        ? Array.from(relevantDocs).join("\n\n---\n\n")
+        : contentToUse.slice(0, 20000);
+  } catch {
+    contextToAnalyze = contentToUse.slice(0, 20000);
+  }
 
   const prompt = ChatPromptTemplate.fromMessages([
     [
@@ -201,7 +225,7 @@ export async function findAnchorOpportunities(
        CRITÉRIOS DE QUALIDADE:
       1. **Relevância Extrema**: O link deve ser útil para quem está lendo *aquela* frase específica.
       2. **Naturalidade**: A âncora deve ser parte gramatical da frase. Não force termos.
-      3. **Tamanho Ideal**: 1 a 5 palavras. Evite linkar frases inteiras.
+      3. **Tamanho Ideal**: 2 a 10 palavras; prefira termos compostos (ex.: "SEO vs GEO", "otimização para IA generativa"). Evite termos genéricos de 1 palavra como "seo", "marketing".
 
       ⚠️ REGRAS DE OURO (HARD CONSTRAINTS):
       - **TIPO PERMITIDO**: Apenas "exact" (A palavra/frase já existe no texto).
@@ -254,6 +278,28 @@ export async function findAnchorOpportunities(
       if (type === "exact") {
         const wordCount = opp.anchor.trim().split(/\s+/).filter(Boolean).length;
         if (wordCount > 8) continue;
+        
+        // Filtro de palavra única: apenas siglas conhecidas são permitidas
+        if (wordCount < 2) {
+          const allowedSingles = new Set([
+            "SEO",
+            "GEO",
+            "IA",
+            "GPT",
+            "OpenAI",
+            "Google",
+            "YouTube",
+            "LinkedIn",
+          ]);
+          const raw = opp.anchor.trim();
+          const isAcronym = /^[A-Z]{2,6}$/.test(raw);
+          if (!allowedSingles.has(raw) && !isAcronym) {
+            console.log(
+              `[Anchor Selector] Rejeitado (Palavra única não permitida): "${raw}"`
+            );
+            continue;
+          }
+        }
 
         let finalTrecho = opp.trecho;
 
@@ -266,7 +312,90 @@ export async function findAnchorOpportunities(
           continue;
         }
 
-        if (!isNaturalSentence(finalTrecho)) continue;
+        if (!isNaturalSentence(finalTrecho)) {
+          console.log(
+            `[Anchor Selector] Rejeitado (Frase não natural): "${finalTrecho.slice(0, 60)}..."`
+          );
+          continue;
+        }
+        
+        // --- VALIDAÇÃO DE CONTEXTO: Detecção de Widget/Sidebar ---
+        // Rejeita items de lista curta que parecem ser widgets ou sidebars
+        const originalLine = content.slice(
+          Math.max(0, content.indexOf(opp.anchor) - 20),
+          content.indexOf(opp.anchor) + opp.anchor.length + 20
+        );
+        const isListItem =
+          /^\s*[\*\-]\s+/.test(originalLine) ||
+          /^\s*[\*\-]\s+/.test(opp.trecho);
+        
+        if (isListItem) {
+          const wordCount = opp.trecho.split(/\s+/).length;
+          // Se for lista curta (< 15 palavras), rejeita (suspeita de Widget)
+          if (wordCount < 15) {
+            console.log(
+              `[Anchor Selector] Rejeitado (Suspeita de Widget/Lista Curta): "${opp.trecho}"`
+            );
+            continue;
+          }
+        }
+        // Bloqueio de boilerplates
+        const lowerAnchor = opp.anchor.toLowerCase();
+        const lowerTrecho = finalTrecho.toLowerCase();
+        const blockedPhrases = [
+          "colocamos seu site no topo",
+          "todos os direitos reservados",
+          "política de privacidade",
+          "termos de uso",
+          "fale conosco",
+          "mapa do site",
+          "seo meta tags",
+          "clique aqui",
+          "saiba mais",
+          "skip to content",
+          "ir para o conteúdo",
+          "copyright",
+          "all rights reserved",
+          "read more",
+          "subscribe",
+          "inscreva-se",
+          "login",
+          "entrar",
+          "sign up",
+          "cadastre-se",
+          "follow us",
+          "siga-nos",
+          "share",
+          "compartilhar",
+          "posted by",
+          "postado por",
+          "leave a comment",
+          "deixe um comentário",
+          "previous post",
+          "post anterior",
+          "next post",
+          "próximo post",
+          "you may also like",
+          "você também pode gostar",
+          "related posts",
+          "posts relacionados",
+          "ubersuggest",
+          "run in-depth",
+          "technical audits",
+          "case studies",
+          "estudos de caso",
+          "advertisement",
+          "publicidade",
+          "sponsored",
+          "patrocinado",
+        ];
+        if (
+          blockedPhrases.some(
+            (phrase) =>
+              lowerAnchor.includes(phrase) || lowerTrecho.includes(phrase)
+          )
+        )
+          continue;
         opp.trecho = finalTrecho;
       } else {
          continue;
@@ -283,7 +412,10 @@ export async function findAnchorOpportunities(
         });
       }
 
-      if (bestTarget && bestTarget.url !== originUrl) {
+      if (bestTarget) {
+        const normDest = normalizeUrlForMetadata(bestTarget.url);
+        const normOrigin = normalizeUrlForMetadata(originUrl);
+        if (normDest === normOrigin) continue;
         seenAnchors.add(uniqueKey);
         opportunities.push({
             anchor: opp.anchor,
@@ -300,8 +432,42 @@ export async function findAnchorOpportunities(
       }
     }
 
-    // Ordenar por score
-    const finalOpportunities = opportunities
+    // --- VALIDAÇÃO ANTI-ALUCINAÇÃO (HARD CONSTRAINT) ---
+    // O trecho PRECISA existir no conteúdo original
+    const validContentOpps = opportunities.filter((o) => {
+      // Normalização para ignorar diferenças de quebra de linha/espaços múltiplos
+      const normalizeForCheck = (s: string) => s.replace(/\s+/g, " ").trim();
+      const cleanContent = normalizeForCheck(content);
+      const cleanTrecho = normalizeForCheck(o.trecho);
+
+      // Verificação 1: Existe exatamente (case-sensitive)?
+      if (content.includes(o.trecho)) return true;
+
+      // Verificação 2: Existe com normalização de espaços?
+      if (cleanContent.includes(cleanTrecho)) return true;
+
+      // Verificação 3: Existe ignorando case (fallback final)?
+      if (cleanContent.toLowerCase().includes(cleanTrecho.toLowerCase())) {
+        return true;
+      }
+
+      console.log(
+        `[Anchor Selector] ❌ ALUCINAÇÃO DETECTADA: O trecho sugerido não existe no texto original.\n   Trecho IA: "${o.trecho.slice(0, 100)}..."`
+      );
+      return false;
+    });
+
+    if (opportunities.length !== validContentOpps.length) {
+      console.log(
+        `[Anchor Selector] 🛡️ Anti-Hallucination: ${
+          opportunities.length - validContentOpps.length
+        } oportunidades removidas por não existirem no texto.`
+      );
+    }
+
+    // Filtro de qualidade e ordenação
+    const highQuality = validContentOpps.filter((o) => o.score >= 0.8);
+    const finalOpportunities = (highQuality.length ? highQuality : opportunities)
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/Button";
 import {
   Link2,
@@ -41,6 +41,20 @@ interface AnalysisMeta {
   total_opportunities: number;
 }
 
+interface ClusterData {
+  pillars: string[];
+  satellites: Record<string, string[]>;
+  clusterIndex: Record<string, string[]>;
+}
+
+interface PageAnalysis {
+  title: string;
+  theme: string;
+  intencao: string;
+  funil: string;
+  clusters: string[];
+}
+
 export default function InlinksOptimizer() {
   const [pillarUrl, setPillarUrl] = useState("");
   const [urlsInput, setUrlsInput] = useState("");
@@ -57,6 +71,21 @@ export default function InlinksOptimizer() {
   const [activeTab, setActiveTab] = useState<"resultados" | "analise" | "logs">(
     "resultados"
   );
+  const [cluster, setCluster] = useState<ClusterData | null>(null);
+  const [analyses, setAnalyses] = useState<Record<string, PageAnalysis> | null>(
+    null
+  );
+  const [progress, setProgress] = useState(0);
+  const tickRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (tickRef.current) {
+        clearInterval(tickRef.current);
+        tickRef.current = null;
+      }
+    };
+  }, []);
 
   const addLog = (msg: string) =>
     setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
@@ -80,6 +109,14 @@ export default function InlinksOptimizer() {
     setMeta(null);
     setLogs([]);
     setActiveTab("logs");
+    setProgress(5);
+    if (tickRef.current) {
+      clearInterval(tickRef.current);
+      tickRef.current = null;
+    }
+    tickRef.current = window.setInterval(() => {
+      setProgress((p) => (p < 70 ? p + 1 : p));
+    }, 250);
 
     addLog("Iniciando análise de Inlinks...");
     addLog(`Modo selecionado: ${strategyMode}`);
@@ -88,11 +125,22 @@ export default function InlinksOptimizer() {
 
     try {
       addLog("Enviando requisição para API...");
+      setProgress(25);
+      const apiKeyHeader = localStorage.getItem("openai_api_key") || "";
+      if (!apiKeyHeader) {
+        const msg =
+          "Chave da API ausente. Configure em Configurações > IA & Integrações.";
+        setError(msg);
+        addLog(msg);
+        setLoading(false);
+        setActiveTab("logs");
+        return;
+      }
       const res = await fetch("/api/analyze-inlinks", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-api-key": localStorage.getItem("openai_api_key") || "",
+          "x-api-key": apiKeyHeader,
           "x-provider": localStorage.getItem("ai_provider") || "openai",
           "x-model": localStorage.getItem("ai_model") || "gpt-4o",
         },
@@ -105,23 +153,39 @@ export default function InlinksOptimizer() {
       });
 
       const data = await res.json();
+      setProgress(80);
 
       if (!res.ok) {
+        if (res.status === 401) {
+          const msg =
+            data.error ||
+            "Chave da API ausente. Configure em Configurações > IA & Integrações.";
+          setError(msg);
+          addLog(msg);
+          setActiveTab("logs");
+          throw new Error(msg);
+        }
         throw new Error(data.error || "Erro na análise");
       }
 
-      // Log server-side errors if any
+      // Log server-side errors and stage logs
       if (data.errors && data.errors.length > 0) {
-        data.errors.forEach((err: string) => addLog(`[ERRO API] ${err}`));
+        data.errors.forEach((err: string) => addLog(`[API] ${err}`));
         if (data.opportunities.length === 0) {
           addLog("A análise falhou para todas as URLs.");
           setError("Falha na análise. Verifique os Logs para detalhes.");
           setActiveTab("logs");
         }
       }
+      if (data.logs && data.logs.length > 0) {
+        data.logs.forEach((log: string) => addLog(log));
+      }
 
       setResults(data.opportunities);
       setMeta(data.meta);
+      setCluster(data.cluster || null);
+      setAnalyses(data.analyses || null);
+      setProgress(95);
 
       if (data.opportunities.length > 0) {
         addLog(
@@ -135,6 +199,11 @@ export default function InlinksOptimizer() {
       addLog(`Erro crítico: ${e.message}`);
     } finally {
       setLoading(false);
+      setProgress(100);
+      if (tickRef.current) {
+        clearInterval(tickRef.current);
+        tickRef.current = null;
+      }
     }
   };
 
@@ -387,6 +456,19 @@ export default function InlinksOptimizer() {
               </Button>
             </div>
           </div>
+          <div className="md:col-span-4">
+            {loading && (
+              <div className="w-full bg-primary/10 rounded-lg h-3 overflow-hidden border border-primary/20">
+                <div
+                  className="h-3 bg-primary rounded"
+                  style={{
+                    width: `${progress}%`,
+                    transition: "width 300ms linear",
+                  }}
+                />
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Results/Tabs Area */}
@@ -440,67 +522,96 @@ export default function InlinksOptimizer() {
                   </span>
                 </div>
               ) : (
-                <div className="space-y-4">
+                <div className="space-y-3">
+                  <div className="grid grid-cols-12 text-xs font-semibold text-muted px-2">
+                    <div className="col-span-4">Origem / Destino</div>
+                    <div className="col-span-4">Ação Recomendada</div>
+                    <div className="col-span-2">Score</div>
+                    <div className="col-span-2">Contexto/Motivo</div>
+                  </div>
                   {results.map((r, i) => {
                     const isOutlink = r.origem === pillarUrl.trim();
+                    const topic = (r as any).target_topic
+                      ? (r as any).target_topic
+                      : (r.reason || "").replace(/^Tópico:\s*/i, "") || "Geral";
                     return (
                       <div
                         key={i}
-                        className="flex gap-4 p-4 border border-primary/10 rounded-lg hover:border-primary/30 hover:bg-primary/5 transition-colors bg-white"
+                        className="grid grid-cols-12 gap-4 p-4 border border-primary/10 rounded-xl bg-white hover:border-primary/30 transition-colors"
                       >
-                        <div className="mt-1">
-                          {isOutlink ? (
+                        <div className="col-span-4 space-y-2">
+                          <div className="flex items-start gap-2">
                             <div
-                              className="p-2 bg-primary/10 text-primary rounded-lg"
-                              title="Outlink (Pilar -> Satélite)"
+                              className={cn(
+                                "p-2 rounded-lg",
+                                isOutlink
+                                  ? "bg-primary/10 text-primary"
+                                  : "bg-background text-muted"
+                              )}
                             >
-                              <ArrowRight className="w-4 h-4" />
+                              <ArrowRight
+                                className={cn(
+                                  "w-4 h-4",
+                                  !isOutlink && "rotate-180"
+                                )}
+                              />
                             </div>
-                          ) : (
-                            <div
-                              className="p-2 bg-background text-muted rounded-lg"
-                              title="Inlink (Satélite -> Pilar)"
-                            >
-                              <ArrowRight className="w-4 h-4 rotate-180" />
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex-1 space-y-2">
-                          <div className="flex justify-between items-start">
-                            <div>
-                              <div className="flex items-center gap-2 text-xs font-semibold mb-1">
-                                <span className="text-muted uppercase tracking-wider">
-                                  Origem:
-                                </span>
-                                <a
-                                  href={r.origem}
-                                  target="_blank"
-                                  className="text-primary hover:underline truncate max-w-[300px] block"
-                                >
-                                  {r.origem}
-                                </a>
+                            <div className="flex-1">
+                              <div className="text-[10px] uppercase tracking-wider">
+                                Origem {isOutlink ? "Pilar" : "Satélite"}
                               </div>
-                              <div className="flex items-center gap-2 text-xs font-semibold">
-                                <span className="text-muted uppercase tracking-wider">
-                                  Destino:
-                                </span>
-                                <a
-                                  href={r.destino}
-                                  target="_blank"
-                                  className="text-primary hover:underline truncate max-w-[300px] block"
-                                >
-                                  {r.destino}
-                                </a>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <span className="bg-primary/10 text-primary px-2 py-1 rounded text-xs font-bold">
-                                {r.score.toFixed(1)} Score
-                              </span>
+                              <a
+                                href={r.origem}
+                                target="_blank"
+                                className="text-primary hover:underline break-words"
+                              >
+                                {r.origem}
+                              </a>
                             </div>
                           </div>
-
-                          <div className="bg-background p-3 rounded text-sm text-foreground/80 italic border-l-2 border-primary/30">
+                          <div className="flex items-start gap-2">
+                            <div
+                              className={cn(
+                                "p-2 rounded-lg",
+                                isOutlink
+                                  ? "bg-background text-muted"
+                                  : "bg-primary/10 text-primary"
+                              )}
+                            >
+                              <ArrowRight
+                                className={cn(
+                                  "w-4 h-4",
+                                  isOutlink && "rotate-180"
+                                )}
+                              />
+                            </div>
+                            <div className="flex-1">
+                              <div className="text-[10px] uppercase tracking-wider">
+                                Destino {isOutlink ? "Satélite" : "Pilar"}
+                              </div>
+                              <a
+                                href={r.destino}
+                                target="_blank"
+                                className="text-primary hover:underline break-words"
+                              >
+                                {r.destino}
+                              </a>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="col-span-4 space-y-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] px-2 py-1 rounded bg-primary/10 text-primary border border-primary/10">
+                              EXACT
+                            </span>
+                            <span className="text-[10px] px-2 py-1 rounded bg-background text-foreground border border-primary/10">
+                              # {topic}
+                            </span>
+                          </div>
+                          <div className="text-sm font-bold text-foreground">
+                            {r.anchor}
+                          </div>
+                          <div className="text-sm text-foreground/80 italic bg-background p-3 rounded border-l-2 border-primary/30 line-clamp-4">
                             "
                             {r.trecho.split(r.anchor).map((part, idx, arr) => (
                               <span key={idx}>
@@ -514,13 +625,15 @@ export default function InlinksOptimizer() {
                             ))}
                             "
                           </div>
-                          <div className="flex items-center justify-end gap-2 mt-2">
-                            <span className="text-xs text-muted">
-                              Âncora sugerida:
-                            </span>
-                            <span className="text-sm font-bold text-primary">
-                              {r.anchor}
-                            </span>
+                        </div>
+                        <div className="col-span-2 flex items-start">
+                          <span className="text-primary font-bold text-lg">
+                            {r.score.toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="col-span-2">
+                          <div className="text-sm">
+                            {r.reason ? r.reason : `Tópico: ${topic}`}
                           </div>
                         </div>
                       </div>
@@ -538,33 +651,143 @@ export default function InlinksOptimizer() {
                     <p>Sem dados de análise</p>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div className="bg-background p-6 rounded-lg border border-primary/10">
-                      <h4 className="font-bold text-foreground mb-4">
-                        Resumo da Execução
-                      </h4>
-                      <ul className="space-y-3 text-sm">
-                        <li className="flex justify-between border-b border-primary/5 pb-2">
-                          <span className="text-muted">Modo</span>
-                          <span className="font-medium text-foreground capitalize">
-                            {meta.mode}
-                          </span>
-                        </li>
-                        <li className="flex justify-between border-b border-primary/5 pb-2">
-                          <span className="text-muted">Páginas Escaneadas</span>
-                          <span className="font-medium text-foreground">
-                            {meta.scanned_pages}
-                          </span>
-                        </li>
-                        <li className="flex justify-between border-b border-primary/5 pb-2">
-                          <span className="text-muted">
-                            Oportunidades Totais
-                          </span>
-                          <span className="font-medium text-primary">
-                            {meta.total_opportunities}
-                          </span>
-                        </li>
-                      </ul>
+                  <div className="space-y-6">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="bg-background p-6 rounded-lg border border-primary/10">
+                        <h4 className="font-bold text-foreground mb-4">
+                          Resumo da Execução
+                        </h4>
+                        <ul className="space-y-3 text-sm">
+                          <li className="flex justify-between border-b border-primary/5 pb-2">
+                            <span className="text-muted">Modo</span>
+                            <span className="font-medium text-foreground capitalize">
+                              {meta.mode}
+                            </span>
+                          </li>
+                          <li className="flex justify-between border-b border-primary/5 pb-2">
+                            <span className="text-muted">
+                              Páginas Escaneadas
+                            </span>
+                            <span className="font-medium text-foreground">
+                              {meta.scanned_pages}
+                            </span>
+                          </li>
+                          <li className="flex justify-between border-b border-primary/5 pb-2">
+                            <span className="text-muted">
+                              Oportunidades Totais
+                            </span>
+                            <span className="font-medium text-primary">
+                              {meta.total_opportunities}
+                            </span>
+                          </li>
+                        </ul>
+                      </div>
+                      <div className="bg-background p-6 rounded-lg border border-primary/10">
+                        <h4 className="font-bold text-foreground mb-4">
+                          Estrutura do Cluster
+                        </h4>
+                        {!cluster ? (
+                          <div className="text-muted text-sm">Sem clusters</div>
+                        ) : (
+                          <div className="space-y-3">
+                            <div>
+                              <div className="text-xs text-muted mb-1">
+                                Pilares Identificados
+                              </div>
+                              <ul className="space-y-1">
+                                {cluster.pillars.map((p) => (
+                                  <li key={p} className="text-sm">
+                                    <a
+                                      href={p}
+                                      target="_blank"
+                                      className="text-primary hover:underline"
+                                    >
+                                      {p}
+                                    </a>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                            <div>
+                              <div className="text-xs text-muted mb-1">
+                                Distribuição de Tópicos
+                              </div>
+                              <div className="space-y-2">
+                                {Object.entries(cluster.clusterIndex).map(
+                                  ([topic, urls]) => (
+                                    <div
+                                      key={topic}
+                                      className="flex items-center gap-3"
+                                    >
+                                      <span className="text-sm w-52 truncate">
+                                        {topic}
+                                      </span>
+                                      <div className="flex-1 h-2 bg-primary/10 rounded">
+                                        <div
+                                          className="h-2 bg-primary rounded"
+                                          style={{
+                                            width: `${Math.min(
+                                              100,
+                                              urls.length * 20
+                                            )}%`,
+                                          }}
+                                        />
+                                      </div>
+                                      <span className="text-xs text-muted">
+                                        {urls.length} páginas
+                                      </span>
+                                    </div>
+                                  )
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      {analyses &&
+                        Object.entries(analyses).map(([url, a]) => (
+                          <div
+                            key={url}
+                            className="p-6 rounded-lg border border-primary/10 bg-white space-y-3"
+                          >
+                            <div className="font-bold text-foreground">
+                              {a.title || "Sem título"}
+                            </div>
+                            <a
+                              href={url}
+                              target="_blank"
+                              className="text-primary text-sm hover:underline"
+                            >
+                              {url}
+                            </a>
+                            <div className="grid grid-cols-3 gap-2 text-xs">
+                              <div className="p-2 border border-primary/10 rounded">
+                                <div className="text-muted">Intenção</div>
+                                <div className="font-medium">{a.intencao}</div>
+                              </div>
+                              <div className="p-2 border border-primary/10 rounded">
+                                <div className="text-muted">Funil</div>
+                                <div className="font-medium">{a.funil}</div>
+                              </div>
+                              <div className="p-2 border border-primary/10 rounded">
+                                <div className="text-muted">Tema Principal</div>
+                                <div className="font-medium">{a.theme}</div>
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {a.clusters?.slice(0, 6).map((c, i) => (
+                                <span
+                                  key={i}
+                                  className="text-xs px-2 py-1 rounded bg-primary/10 text-primary border border-primary/10"
+                                >
+                                  {c}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
                     </div>
                   </div>
                 )}
